@@ -109,11 +109,9 @@ export class SensingTab {
           <div class="sensing-card">
             <div class="sensing-card-title">About This Data</div>
             <p class="sensing-about-text">
-              Metrics are computed from WiFi Channel State Information (CSI).
-              With <strong><span id="sensingNodeCount">0</span> ESP32 node(s)</strong> you get presence detection, breathing
-              estimation, and gross motion. Add <strong>3-4+ ESP32 nodes</strong>
-              around the room for spatial resolution and limb-level tracking.
+              Tracking <strong><span id="sensingNodeCount">0</span> <span id="sensingNodeCountLabel">ESP32 node(s)</span></strong>.
             </p>
+            <p class="sensing-about-text" id="sensingAboutText"></p>
           </div>
 
           <!-- Node Status -->
@@ -224,8 +222,16 @@ export class SensingTab {
     if (banner) {
       // Map the service's dataSource to banner text and CSS modifier class.
       const dataSource = sensingService.dataSource;
+      // 'live' covers every real source -- it previously always said "ESP32
+      // HARDWARE", which is wrong for WiFi RSSI sensing (server source is
+      // e.g. "wifi:MyNetwork", no ESP32 involved). Label it from the raw
+      // source instead.
+      const raw = sensingService.serverSource || '';
+      const liveText = raw.startsWith('wifi:') || raw === 'wifi'
+        ? 'LIVE \u2014 WIFI RSSI'
+        : 'LIVE \u2014 ESP32 HARDWARE';
       const bannerConfig = {
-        'live':              { text: 'LIVE \u2014 ESP32 HARDWARE',           cls: 'sensing-source-live' },
+        'live':              { text: liveText,                              cls: 'sensing-source-live' },
         'server-simulated':  { text: 'SIMULATED \u2014 NO HARDWARE',        cls: 'sensing-source-server-sim' },
         'reconnecting':      { text: 'RECONNECTING...',                    cls: 'sensing-source-reconnecting' },
         'unreachable':       { text: 'NO DATA \u2014 SERVER UNREACHABLE',   cls: 'sensing-source-simulated' },
@@ -242,21 +248,56 @@ export class SensingTab {
   _updateHUD(data) {
     const f = data.features || {};
     const c = data.classification || {};
+    // "wifi:<ssid>" (macOS/Windows RSSI scan) vs "esp32" (real CSI hardware).
+    // The two have unrelated data shapes and magnitudes -- see below.
+    const isWifiRssi = typeof data.source === 'string' &&
+      (data.source === 'wifi' || data.source.startsWith('wifi:'));
 
-    // Node count
-    const nodeCount = (data.nodes || []).length;
+    // Node count. ESP32 mode: one physical mesh node per entry in `nodes`.
+    // WiFi RSSI mode: `nodes` is always a single synthetic aggregate (one
+    // entry regardless of how many access points fed it) -- `bssid_count`
+    // is the number that actually varies and matters here.
+    const nodeCount = isWifiRssi
+      ? (data.bssid_count ?? (data.nodes || []).length)
+      : (data.nodes || []).length;
     const countEl = this.container.querySelector('#sensingNodeCount');
     if (countEl) countEl.textContent = String(nodeCount);
+    const countLabel = this.container.querySelector('#sensingNodeCountLabel');
+    if (countLabel) countLabel.textContent = isWifiRssi ? 'access point(s)' : 'ESP32 node(s)';
+    const aboutText = this.container.querySelector('#sensingAboutText');
+    if (aboutText) {
+      aboutText.textContent = isWifiRssi
+        ? 'Metrics are computed from WiFi RSSI variance across nearby access points ' +
+          '(no Channel State Information / phase data). This gives presence detection ' +
+          'and gross motion classification only -- no pose or limb-level tracking, ' +
+          'which requires CSI hardware such as an ESP32.'
+        : 'Metrics are computed from WiFi Channel State Information (CSI). ' +
+          'With 1 ESP32 node you get presence detection, breathing estimation, and ' +
+          'gross motion. Add 3-4+ ESP32 nodes around the room for spatial resolution ' +
+          'and limb-level tracking.';
+    }
 
     // RSSI
     this._setText('sensingRssi', `${(f.mean_rssi || -80).toFixed(1)} dBm`);
     this._setText('sensingSource', data.source || '');
 
-    // Bars (scale to 0-100%)
-    this._setBar('barVariance', f.variance, 10, 'valVariance', f.variance);
-    this._setBar('barMotion', f.motion_band_power, 0.5, 'valMotion', f.motion_band_power);
-    this._setBar('barBreath', f.breathing_band_power, 0.3, 'valBreath', f.breathing_band_power);
-    this._setBar('barSpectral', f.spectral_power, 2.0, 'valSpectral', f.spectral_power);
+    // Bars (scale to 0-100%). MEASURED (not rigorously calibrated) WiFi RSSI
+    // ranges on this machine: `variance`/`spectral_power`/`motion_band_power`/
+    // `breathing_band_power` all land in the tens-of-thousands, because
+    // `rssi_to_amplitude` is exponential (10^((dbm+100)/20)) and a macOS scan
+    // returns 20-30+ heterogeneous access points spanning a wide RSSI range
+    // (a few meters away to a distant neighbor's router) -- nothing like the
+    // homogeneous, single-link magnitude these maxVal constants were tuned
+    // for with real ESP32 CSI data. Without this branch every WiFi RSSI bar
+    // pins at 100% regardless of what's actually happening.
+    const maxVariance = isWifiRssi ? 50000 : 10;
+    const maxMotion = isWifiRssi ? 30000 : 0.5;
+    const maxBreath = isWifiRssi ? 100000 : 0.3;
+    const maxSpectral = isWifiRssi ? 50000 : 2.0;
+    this._setBar('barVariance', f.variance, maxVariance, 'valVariance', f.variance);
+    this._setBar('barMotion', f.motion_band_power, maxMotion, 'valMotion', f.motion_band_power);
+    this._setBar('barBreath', f.breathing_band_power, maxBreath, 'valBreath', f.breathing_band_power);
+    this._setBar('barSpectral', f.spectral_power, maxSpectral, 'valSpectral', f.spectral_power);
 
     // Classification
     const label = this.container.querySelector('#classLabel');

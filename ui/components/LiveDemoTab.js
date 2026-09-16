@@ -1316,11 +1316,23 @@ export class LiveDemoTab {
       return this.state.connectionState === 'error' ? 'Error' : 'Ready';
     }
     const ds = sensingService.dataSource;
-    if (ds === 'live') return 'Active \u2014 ESP32 Live';
+    // 'live' covers any real source, not only ESP32 -- see updateSourceBanner.
+    if (ds === 'live') return `Active \u2014 ${this._liveSourceLabel()} Live`;
     if (ds === 'server-simulated') return 'Active \u2014 Simulated Data';
     if (ds === 'unreachable') return 'No Data \u2014 Server Unreachable';
     if (ds === 'simulated') return 'INVENTED DATA \u2014 Not Measured';
     return 'Connecting...';
+  }
+
+  /**
+   * 'live' covers every real source (ESP32 CSI, or WiFi RSSI on macOS/
+   * Windows -- server source string e.g. "wifi:MyNetwork") -- not only
+   * ESP32. Read the raw source so the demo doesn't claim ESP32 hardware
+   * that isn't actually connected.
+   */
+  _liveSourceLabel() {
+    const raw = sensingService.serverSource || '';
+    return raw.startsWith('wifi:') || raw === 'wifi' ? 'WiFi RSSI' : 'ESP32';
   }
 
   /** Update the prominent data-source banner at the top of Live Demo. */
@@ -1329,7 +1341,7 @@ export class LiveDemoTab {
     if (!banner) return;
     const ds = sensingService.dataSource;
     const config = {
-      'live':             { text: 'LIVE \u2014 ESP32 Hardware Connected',           cls: 'demo-source-live' },
+      'live':             { text: `LIVE \u2014 ${this._liveSourceLabel()} Hardware Connected`,           cls: 'demo-source-live' },
       'server-simulated': { text: 'SIMULATED DATA \u2014 No Hardware Detected',     cls: 'demo-source-sim' },
       'reconnecting':     { text: 'RECONNECTING TO SERVER...',                      cls: 'demo-source-reconnecting' },
       'unreachable':      { text: 'NO DATA \u2014 Server Unreachable, Display Is Stale', cls: 'demo-source-offline' },
@@ -1370,7 +1382,7 @@ export class LiveDemoTab {
     if (elements.connectionStatus) {
       const ds = sensingService.dataSource;
       const dsLabels = {
-        'live':              'Connected \u2014 ESP32',
+        'live':              `Connected \u2014 ${this._liveSourceLabel()}`,
         'server-simulated':  'Connected \u2014 Simulated',
         'reconnecting':      'Reconnecting...',
         'simulated':         'Offline \u2014 Simulated',

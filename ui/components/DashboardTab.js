@@ -91,8 +91,16 @@ export class DashboardTab {
     const ds = sensingService.dataSource;
     const statusText = el.querySelector('.status-text');
     const statusMsg  = el.querySelector('.status-message');
+    // 'live' covers every real source (ESP32 CSI, macOS/Windows WiFi RSSI) --
+    // it previously always said "ESP32", which was simply wrong for WiFi RSSI
+    // sensing (the server's source string is e.g. "wifi:MyNetwork", not an
+    // ESP32 device). Read the raw source to label it accurately.
+    const raw = sensingService.serverSource || '';
+    const liveCfg = raw.startsWith('wifi:') || raw === 'wifi'
+      ? { text: 'WIFI RSSI', msg: 'Real Wi-Fi signal connected (no CSI/pose — presence & motion only)' }
+      : { text: 'ESP32', msg: 'Real hardware connected' };
     const config = {
-      'live':              { text: 'ESP32',     status: 'healthy', msg: 'Real hardware connected' },
+      'live':              { status: 'healthy', ...liveCfg },
       'server-simulated':  { text: 'SIMULATED', status: 'warning', msg: 'Server running without hardware' },
       'reconnecting':      { text: 'RECONNECTING', status: 'degraded', msg: 'Attempting to connect...' },
       'unreachable':       { text: 'NO DATA',   status: 'unhealthy', msg: 'Server unreachable — readings below are stale' },

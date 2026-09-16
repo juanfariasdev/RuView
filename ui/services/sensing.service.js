@@ -455,7 +455,23 @@ class SensingService {
       }
       return;
     }
-    if (rawSource === 'esp32' || rawSource === 'wifi' || rawSource === 'live') {
+    // The server qualifies live WiFi/ESP32 sources with detail, e.g.
+    // "wifi:MyNetwork" or "esp32:offline" (see wifi-densepose-sensing-server
+    // main.rs `s.source = format!("wifi:{ssid}")`) -- an exact-string match
+    // against the bare name never matches those and always fell through to
+    // "server-simulated" below. Once that happens, this bare source string
+    // never changes again for the life of the connection (same SSID), so
+    // `_handleData`'s `raw !== this._serverSource` short-circuit never
+    // re-evaluates it: a single unlucky race with the initial
+    // `_detectServerSource()` fetch (or that fetch failing) permanently
+    // stuck the UI on "Simulated" even while real data was flowing.
+    if (
+      rawSource === 'esp32' ||
+      rawSource === 'wifi' ||
+      rawSource === 'live' ||
+      (typeof rawSource === 'string' &&
+        (rawSource.startsWith('esp32:') || rawSource.startsWith('wifi:')))
+    ) {
       this._setDataSource('live');
     } else if (rawSource === 'simulated' || rawSource === 'simulate') {
       this._setDataSource('server-simulated');
