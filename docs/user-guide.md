@@ -330,20 +330,27 @@ docker run --network host ruvnet/wifi-densepose:latest --source wifi --tick-ms 5
 
 ### macOS WiFi (RSSI Only)
 
-Uses CoreWLAN via a Swift helper app bundle. macOS redacts real BSSIDs unless the helper is authorized; the adapter generates deterministic synthetic MACs (or abstains) so the multi-BSSID pipeline still works either way. Real (non-redacted) BSSIDs are MEASURED working end-to-end on macOS 26.6.2 after `--request-access` — see [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) for the one-time setup and why a plain Location grant alone wasn't enough (needs a real `NSApplication` too, per [ADR-025 §9.1](adr/ADR-025-macos-corewlan-wifi-sensing.md#91-empirical-result-location-authorization-was-necessary-but-not-sufficient--a-real-nsapplication-is-also-required)).
+Uses CoreWLAN via a Swift helper app bundle that scans for nearby networks. macOS redacts real BSSIDs unless the helper is authorized; the adapter generates deterministic synthetic MACs (or abstains) so the multi-BSSID pipeline still works either way. Real (non-redacted), multi-network data is MEASURED working end-to-end on macOS 26.6.2 — see [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) and [ADR-025 §9](adr/ADR-025-macos-corewlan-wifi-sensing.md#91-empirical-result-location-authorization-was-necessary-but-not-sufficient--a-real-nsapplication-is-also-required) for what it took: a real `NSApplication` (not just a Location grant), a full scan (not just the connected interface), and the two wiring notes below.
 
 ```bash
 # Build the mac_wifi.app helper (once)
 cd v2/tools/macos-wifi-scan && ./build.sh
 
-# Grant Location access, interactively, once per machine
+# Grant Location access, interactively, once per machine (and again after
+# every rebuild -- ad-hoc signing invalidates the grant each time, see the
+# README)
 ./mac_wifi.app/Contents/MacOS/mac_wifi --request-access
 
-# Put it on $PATH (MacosCoreWlanScanner looks for "mac_wifi" on $PATH)
-ln -sf "$(pwd)/mac_wifi.app/Contents/MacOS/mac_wifi" ~/.local/bin/mac_wifi
+# Point the adapter at the real bundle path -- NOT a $PATH symlink, which
+# MEASURED as still-redacted (ADR-025 §9.3)
+export RUVIEW_MACOS_WIFI_HELPER="$(pwd)/mac_wifi.app/Contents/MacOS/mac_wifi"
 
-# Run natively
-./target/release/sensing-server --source macos --http-port 3000 --ws-port 3001 --tick-ms 500
+# Run natively. Note: the source name is "wifi" on every platform --
+# "macos" is not a recognized --source value and silently runs nothing.
+# A scan can take several seconds (Apple's own CWInterface docs), so keep
+# --tick-ms well above 1000.
+cd ../..
+./target/release/sensing-server --source wifi --http-port 3000 --ws-port 3001 --tick-ms 3000
 ```
 
 See [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) and [ADR-025](adr/ADR-025-macos-corewlan-wifi-sensing.md) for details.

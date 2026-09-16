@@ -18,11 +18,12 @@
 //                       Run this once, interactively, after every
 //                       build/reinstall. Never invoked by the Rust adapter.
 //
-//   --scan-once         Fast, non-interactive. Never prompts and never blocks
-//                       on user input — this is the only mode the Rust
-//                       adapter calls, on a tight polling loop with a 5s
-//                       timeout. It reads whatever CoreWLAN currently allows
-//                       and reports it truthfully, redacted or not.
+//   --scan-once         Never prompts and never blocks on user input beyond
+//                       the scan itself — this is the only mode the Rust
+//                       adapter calls, on a polling loop with a 12s timeout
+//                       (a scan can legitimately take several seconds; see
+//                       ADR-025 §9.1). It reads whatever CoreWLAN currently
+//                       allows and reports it truthfully, redacted or not.
 //
 // `--scan-once` NEVER fabricates or "fixes" a redacted BSSID: it reports
 // exactly what CoreWLAN returns (the real MAC, or the `00:00:00:00:00:00`
@@ -152,10 +153,11 @@ func emitLine(ssid: String, bssid: String, channel: Int, rssi: Int, noise: Int) 
 ///
 /// Never requests authorization, never blocks on user input beyond the scan
 /// itself — safe to call on every tick of the Rust adapter's polling loop,
-/// which allows 5s. Apple's own docs say a scan "will block for the
-/// duration of the scan" (observed here: comfortably under 5s including
-/// this scan), which is also enough time for the CoreWLAN/locationd startup
-/// races described below to settle without a separate artificial delay.
+/// which allows 12s. Apple's own docs say a scan "will block for the
+/// duration of the scan"; MEASURED durations here ranged from ~0.4s (cached)
+/// to several seconds (cold), which is also enough time for the
+/// CoreWLAN/locationd startup races described below to settle without a
+/// separate artificial delay.
 func emitScanOnce() {
     // A freshly-launched process's location authorization state can still be
     // mid-sync with `locationd` at this point (see `LocationAuthorizer.status`).

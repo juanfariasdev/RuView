@@ -338,9 +338,9 @@ ad-hoc-signed `mac_wifi.app` with two CLI modes on the same binary:
   "always" authorization) and waits, bounded, for the user's decision via the
   modern `locationManagerDidChangeAuthorization(_:)` delegate callback.
 - `--scan-once` — the only mode the Rust adapter calls. Never requests
-  authorization and never blocks on user input; it reads
-  `CWWiFiClient.shared().interface()` and reports whatever CoreWLAN currently
-  allows, redacted or not, within the existing 5s subprocess timeout.
+  authorization; scans for nearby networks (`scanForNetworks`, not just the
+  connected interface — §9.2) and reports whatever CoreWLAN currently allows
+  per network, redacted or not, within a 12s subprocess timeout (§9.3).
 
 The Rust-side synthetic-BSSID / abstain policy (§2.1.3, `resolve_bssid` in
 `macos_scanner.rs`) is unchanged and deliberately not duplicated in the Swift
@@ -383,18 +383,67 @@ Diagnostic path (each numbered step confirmed before moving to the next):
 4. **Fix**: `main.swift` never engaged AppKit's application lifecycle — it
    was a bare `Foundation`-linked executable that happened to sit inside an
    `.app` bundle. Calling `NSApplication.shared.setActivationPolicy(.accessory)`
-   once at process start (keeping it Dock-less, matching `LSUIElement`),
-   combined with a second, CoreWLAN-specific settle delay
-   (`RunLoop.main.run(until:)`, ~0.5s, after acquiring the interface and
-   before reading `ssid()`/`bssid()`), made `--scan-once` return real values
-   (`bssid:"90:76:9f:73:e0:a5"`, `ssid:"Juan Farias"`), reproducibly across
-   repeated calls. CoreWLAN's redaction check apparently verifies the calling
-   process is a real, WindowServer-registered application, not merely a
-   process holding a valid TCC grant.
+   once at process start (keeping it Dock-less, matching `LSUIElement`) made
+   `--scan-once` return real values (`bssid:"90:76:9f:73:e0:a5"`,
+   `ssid:"Juan Farias"`), reproducibly across repeated calls. CoreWLAN's
+   redaction check apparently verifies the calling process is a real,
+   WindowServer-registered application, not merely a process holding a valid
+   TCC grant.
+
+### 9.2 A Single Connected-Interface Reading Is Not Enough for the Pipeline
+
+Getting real values out of `mac_wifi` did not, by itself, make
+`/api/v1/sensing/latest` produce data end-to-end. `--scan-once` originally
+read only `CWWiFiClient.shared().interface()` — one observation (the
+connected AP). §2.1's quality gate (`min_bssids: 3` by default, `quality_gate.rs`)
+structurally denies any frame with fewer than 3 BSSIDs, so a single-observation
+helper can never clear it, no matter how "real" that one observation is.
+
+Fixed by having `--scan-once` also call `interface.scanForNetworks(withSSID: nil)`
+(MEASURED: ~0.4-5s per call, occasionally longer — see §9.3) and emit one JSON
+line per visible network, in addition to the connected-interface line. On this
+machine that MEASURED 20-30+ distinct BSSIDs per scan, comfortably clearing
+the quality gate (observed `quality=0.7-0.85, verdict=Permit`).
+
+### 9.3 Wiring Notes: `--source wifi` (Not `--source macos`), a Real Path (Not a `$PATH` Symlink), and a Longer Timeout
+
+Three more gaps surfaced getting the full `sensing-server` binary to produce
+data, none of them CoreWLAN-specific:
+
+1. **CLI flag**: the sensing server's `--source` parser (`plan_source` in
+   `wifi-densepose-sensing-server/src/main.rs`) only recognizes `"wifi"` for
+   the platform WiFi capture task; `"macos"` silently falls through to the
+   "unknown source, no tasks" branch (`initial_source` is set verbatim to
+   the string you passed, which is why `/api/v1/status` looked plausible
+   while nothing was actually running). `docs/user-guide.md` documented
+   `--source macos`, which was simply wrong; corrected to `--source wifi`
+   (the `#[cfg(target_os = "macos")]` branch inside `wifi_task` is what
+   actually selects `MacosCoreWlanScanner`, independent of the CLI value).
+2. **`$PATH` symlink breaks bundle identity**: `MacosCoreWlanScanner::new()`
+   defaults to `Command::new("mac_wifi")`, resolved via `$PATH`. A symlink
+   from a `$PATH` directory (e.g. `~/.local/bin/mac_wifi`) to the real
+   `mac_wifi.app/Contents/MacOS/mac_wifi` executable MEASURED as
+   **redacted** (`bssid:"00:00:00:00:00:00"`), while invoking the identical
+   file by its real, in-bundle path MEASURED as real values — same binary,
+   same cdhash, different invocation path. macOS's CFBundle/TCC resolution
+   for a bundled executable appears to key off the literal invoked path
+   (`argv[0]`/the `$PATH`-joined path), not the symlink-resolved inode, so a
+   generic-directory symlink is not recognized as "inside `mac_wifi.app`".
+   Fixed by adding a `RUVIEW_MACOS_WIFI_HELPER` environment variable
+   override (checked in `MacosCoreWlanScanner::new()`) pointing directly at
+   the real `.../mac_wifi.app/Contents/MacOS/mac_wifi` path — no symlink.
+3. **Timeout headroom**: `scan_sync`'s subprocess deadline was 5s. MEASURED
+   scan durations here ranged from ~0.4s (cached) to over 5s (cold),
+   producing intermittent `"...timed out; rebuild the Swift helper"` warnings
+   under load even with a correctly-working helper. Raised to 12s. A
+   `--tick-ms` around 2000-3000ms (not 500-1000ms) matches this API's real
+   latency better; §1.2/§6 already documented the expected ~0.3-0.5 Hz
+   effective rate.
 
 **Reproducer:** `v2/tools/macos-wifi-scan/main.swift` (`NSApplication.shared.setActivationPolicy(.accessory)`
-near the top of the file, plus the settle delay in `emitScanOnce`). Build via
-`./build.sh`, run `mac_wifi --request-access` once, then `mac_wifi --scan-once`.
+near the top of the file, plus the `scanForNetworks` call in `emitScanOnce` —
+§9.2). Build via `./build.sh`, run `mac_wifi --request-access` once, then
+`mac_wifi --scan-once`.
 
 **Status of the mitigation in §2.1.3 / §6:** unchanged and still correct as a
 safety net for whatever CoreWLAN returns (redacted or not) — this finding

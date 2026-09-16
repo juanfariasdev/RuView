@@ -21,21 +21,28 @@
 //! (`v2/tools/macos-wifi-scan/mac_wifi.app`, see that crate's README) with a
 //! one-time interactive `--request-access` step, rather than a bare
 //! `swiftc`-compiled script — a script has no bundle identity and can never
-//! be authorized. The fast `--scan-once` path this adapter calls never
-//! prompts and never blocks on user input.
+//! be authorized. The `--scan-once` path this adapter calls never prompts,
+//! but does actively scan and can take several seconds (see `helper_path`/
+//! [`Self::scan_sync`]'s 12s timeout below).
 //!
-//! **Location authorization alone was not sufficient in practice** (MEASURED
-//! on macOS 26.6.2): a confirmed, correctly-synced `authorizedAlways` grant
-//! still left `--scan-once` reporting a redacted BSSID/SSID until the helper
-//! also registered a real `NSApplication` (`.accessory` activation policy) —
-//! CoreWLAN's redaction check apparently also verifies the calling process is
-//! a real, WindowServer-registered application, not just a process holding a
-//! valid TCC grant. See `v2/tools/macos-wifi-scan/README.md` and ADR-025
-//! §9.1 for the full investigation and reproducer. Real observations are
-//! MEASURED once the helper is authorized and up to date; an out-of-date
-//! `mac_wifi` build predating this fix, or an unauthorized one, still
-//! reports the redacted sentinel, which this adapter continues to handle via
-//! [`resolve_bssid`] below.
+//! **Three things beyond a Location grant turned out to be required in
+//! practice** (MEASURED on macOS 26.6.2; full investigation, reproducers,
+//! and exact commands in ADR-025 §9):
+//!
+//! 1. The helper must register a real `NSApplication` (`.accessory`
+//!    activation policy) — a confirmed, correctly-synced `authorizedAlways`
+//!    grant alone still left redacted BSSID/SSID (§9.1).
+//! 2. The helper must scan (`scanForNetworks`), not just read the connected
+//!    interface — this adapter's own quality gate (`min_bssids: 3` by
+//!    default) structurally rejects a single-observation reading (§9.2).
+//! 3. [`Self::new`] must be pointed at the helper's real, in-bundle path via
+//!    `RUVIEW_MACOS_WIFI_HELPER` — a `$PATH` symlink to the identical file
+//!    MEASURED as still-redacted, because macOS's CFBundle/TCC resolution
+//!    keys off the literal invoked path, not the symlink target (§9.3).
+//!
+//! An out-of-date `mac_wifi` build predating these fixes, or an unauthorized
+//! one, still reports the redacted sentinel, which this adapter continues to
+//! handle via [`resolve_bssid`] below.
 //!
 //! When we detect a zeroed/redacted BSSID from the helper, *this adapter* —
 //! not the helper — generates a deterministic synthetic MAC via
@@ -73,16 +80,32 @@ use crate::error::WifiScanError;
 /// If the helper is not found, [`scan_sync`](Self::scan_sync) returns a
 /// [`WifiScanError::ProcessError`].
 pub struct MacosCoreWlanScanner {
-    /// Path to the `mac_wifi` helper binary. Defaults to `"mac_wifi"` (on PATH).
+    /// Path to the `mac_wifi` helper binary. Defaults to `"mac_wifi"` (on PATH),
+    /// overridable via `RUVIEW_MACOS_WIFI_HELPER` (see [`Self::new`]).
     helper_path: String,
 }
 
+/// Overrides the default `"mac_wifi"` PATH lookup in [`MacosCoreWlanScanner::new`].
+pub const HELPER_PATH_ENV_VAR: &str = "RUVIEW_MACOS_WIFI_HELPER";
+
 impl MacosCoreWlanScanner {
-    /// Create a scanner that looks for `mac_wifi` on `$PATH`.
+    /// Create a scanner that looks for `mac_wifi` on `$PATH`, or at the path
+    /// named by `RUVIEW_MACOS_WIFI_HELPER` when set.
+    ///
+    /// A plain `$PATH` symlink to the bundled executable is **not**
+    /// equivalent to invoking it by its real, in-bundle path: macOS's
+    /// CFBundle/TCC resolution keys off the literal invoked path (`argv[0]`),
+    /// not the symlink's target inode, so a helper invoked as e.g.
+    /// `~/.local/bin/mac_wifi` is not recognized as living inside
+    /// `mac_wifi.app` and CoreWLAN redacts BSSID/SSID again — confirmed
+    /// empirically (ADR-025 §9.1): the same binary returned real values via
+    /// `mac_wifi.app/Contents/MacOS/mac_wifi` and redacted values via a
+    /// `$PATH` symlink to that identical file. Set
+    /// `RUVIEW_MACOS_WIFI_HELPER=/path/to/mac_wifi.app/Contents/MacOS/mac_wifi`
+    /// (the real path, not a symlink) rather than relying on `$PATH`.
     pub fn new() -> Self {
-        Self {
-            helper_path: "mac_wifi".to_owned(),
-        }
+        let helper_path = std::env::var(HELPER_PATH_ENV_VAR).unwrap_or_else(|_| "mac_wifi".to_owned());
+        Self { helper_path }
     }
 
     /// Create a scanner with an explicit path to the Swift helper binary.
@@ -94,8 +117,9 @@ impl MacosCoreWlanScanner {
 
     /// Run the Swift helper and parse the output synchronously.
     ///
-    /// Returns one [`BssidObservation`] for the connected link.
-    /// Helpers that fail to exit within five seconds are killed and reaped.
+    /// Returns one [`BssidObservation`] per visible network (ADR-025 §9.1's
+    /// `scanForNetworks`-based helper, not just the connected link).
+    /// Helpers that fail to exit within the deadline are killed and reaped.
     pub fn scan_sync(&self) -> Result<Vec<BssidObservation>, WifiScanError> {
         let mut child = Command::new(&self.helper_path)
             .arg("--scan-once")
@@ -109,9 +133,13 @@ impl MacosCoreWlanScanner {
                 ))
             })?;
 
-        // Older helpers ignore --scan-once and stream forever. Bound the
-        // wait so an outdated installation cannot hang capture or auto-detect.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Older helpers ignore --scan-once and stream forever, so this must
+        // stay bounded -- but Apple's own CWInterface docs say a scan "will
+        // block for the duration of the scan", and MEASURED durations here
+        // ranged from ~0.4s (cached) to over 5s (cold). 12s gives headroom
+        // above that observed range while still bounding a truly hung/legacy
+        // helper.
+        let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
