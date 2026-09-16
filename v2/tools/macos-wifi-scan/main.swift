@@ -20,10 +20,12 @@
 //
 //   --scan-once         Never prompts and never blocks on user input beyond
 //                       the scan itself — this is the only mode the Rust
-//                       adapter calls, on a polling loop with a 12s timeout
-//                       (a scan can legitimately take several seconds; see
-//                       ADR-025 §9.1). It reads whatever CoreWLAN currently
-//                       allows and reports it truthfully, redacted or not.
+//                       adapter calls, on a polling loop with a 20s timeout.
+//                       Poll slowly (>=20s between calls): sustained faster
+//                       polling MEASURED tripping a macOS-level active-scan
+//                       rate limit after 1-2 calls (see ADR-025 section 9.4).
+//                       It reads whatever CoreWLAN currently allows and
+//                       reports it truthfully, redacted or not.
 //
 // `--scan-once` NEVER fabricates or "fixes" a redacted BSSID: it reports
 // exactly what CoreWLAN returns (the real MAC, or the `00:00:00:00:00:00`
@@ -153,10 +155,14 @@ func emitLine(ssid: String, bssid: String, channel: Int, rssi: Int, noise: Int) 
 ///
 /// Never requests authorization, never blocks on user input beyond the scan
 /// itself — safe to call on every tick of the Rust adapter's polling loop,
-/// which allows 12s. Apple's own docs say a scan "will block for the
-/// duration of the scan"; MEASURED durations here ranged from ~0.4s (cached)
-/// to several seconds (cold), which is also enough time for the
-/// CoreWLAN/locationd startup races described below to settle without a
+/// which allows 20s, PROVIDED the caller polls slowly (ADR-025 section 9.4:
+/// sustained polling faster than ~20s apart MEASURED tripping a macOS-level
+/// active-scan rate limit, where scans then block far longer than any
+/// reasonable per-call deadline until polling backs off). Apple's own docs
+/// say a scan "will block for the duration of the scan"; MEASURED durations
+/// for an isolated call ranged from ~0.4s (cached) to several seconds
+/// (cold), which is also enough time for the CoreWLAN/locationd startup
+/// races described below to settle without a
 /// separate artificial delay.
 func emitScanOnce() {
     // A freshly-launched process's location authorization state can still be

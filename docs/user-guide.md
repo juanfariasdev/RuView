@@ -347,10 +347,12 @@ export RUVIEW_MACOS_WIFI_HELPER="$(pwd)/mac_wifi.app/Contents/MacOS/mac_wifi"
 
 # Run natively. Note: the source name is "wifi" on every platform --
 # "macos" is not a recognized --source value and silently runs nothing.
-# A scan can take several seconds (Apple's own CWInterface docs), so keep
-# --tick-ms well above 1000.
+# Polling faster than this MEASURED tripping a macOS-level active-scan rate
+# limit after 1-2 ticks (every subsequent scan then blocks 12s+, indefinitely,
+# not just occasionally slow) -- see ADR-025 section 9.4. --tick-ms 20000 MEASURED
+# clean (zero timeouts across 90s+).
 cd ../..
-./target/release/sensing-server --source wifi --http-port 3000 --ws-port 3001 --tick-ms 3000
+./target/release/sensing-server --source wifi --http-port 3000 --ws-port 3001 --tick-ms 20000
 ```
 
 See [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) and [ADR-025](adr/ADR-025-macos-corewlan-wifi-sensing.md) for details.

@@ -97,15 +97,26 @@ Check the current grant at any time without prompting:
 `"$RUVIEW_MACOS_WIFI_HELPER" --status`.
 
 Then run the sensing server (with `RUVIEW_MACOS_WIFI_HELPER` still exported)
-as documented in [docs/user-guide.md](../../../docs/user-guide.md). Two
-details that are easy to get wrong (ADR-025 §9.3):
+as documented in [docs/user-guide.md](../../../docs/user-guide.md). Three
+details that are easy to get wrong (ADR-025 §9.3-§9.4):
 
 ```bash
 # "wifi" is the source name on every platform -- "macos" is not a recognized
-# --source value and silently runs nothing. A scan can take several seconds,
-# so keep --tick-ms well above 1000.
-./target/release/sensing-server --source wifi --http-port 3000 --ws-port 3001 --tick-ms 3000
+# --source value and silently runs nothing.
+#
+# Poll slowly. MEASURED: --tick-ms 3000 works for the first 1-2 ticks, then
+# every subsequent scan blocks 12s+ (a macOS-level active-scan rate limit,
+# not an occasional slow scan) until polling backs off. --tick-ms 20000
+# MEASURED clean (zero timeouts across 90s+).
+#
+# The UI's own WebSocket auto-detection (ui/services/sensing.service.js)
+# only recognizes http-port 3000->ws-port 3001 and 8080->8765 -- use one of
+# those pairs, or the UI can't find the stream and silently falls back to
+# simulated data after it exhausts its reconnect attempts.
+./target/release/sensing-server --source wifi --http-port 3000 --ws-port 3001 --tick-ms 20000
 ```
+
+Open `http://localhost:3000/ui/index.html` in a browser once it's running.
 
 ## Output contract
 

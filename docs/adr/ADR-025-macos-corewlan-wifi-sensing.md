@@ -432,13 +432,34 @@ data, none of them CoreWLAN-specific:
    Fixed by adding a `RUVIEW_MACOS_WIFI_HELPER` environment variable
    override (checked in `MacosCoreWlanScanner::new()`) pointing directly at
    the real `.../mac_wifi.app/Contents/MacOS/mac_wifi` path — no symlink.
-3. **Timeout headroom**: `scan_sync`'s subprocess deadline was 5s. MEASURED
-   scan durations here ranged from ~0.4s (cached) to over 5s (cold),
-   producing intermittent `"...timed out; rebuild the Swift helper"` warnings
-   under load even with a correctly-working helper. Raised to 12s. A
-   `--tick-ms` around 2000-3000ms (not 500-1000ms) matches this API's real
-   latency better; §1.2/§6 already documented the expected ~0.3-0.5 Hz
-   effective rate.
+3. **Timeout headroom**: `scan_sync`'s subprocess deadline was 5s, raised to
+   20s (see §9.4 for why 20s specifically).
+
+### 9.4 Sustained Polling Trips a macOS-Level Active-Scan Rate Limit
+
+An isolated `mac_wifi --scan-once` call reliably MEASURED 0.4-7s. Running
+`sensing-server --tick-ms 3000` (a scan roughly every 3s) MEASURED fine for
+the first 1-2 ticks, then **every subsequent scan blocked for 12s+** in a
+perfectly regular pattern (`WiFi scan error: ... timed out` every 15s = the
+12s deadline then in effect + the 3s tick period) — for over a minute of
+sustained polling, not an occasional slow scan. Killing the server and
+re-running an isolated `mac_wifi --scan-once` immediately after MEASURED
+fast again (0.4s). This is consistent with `CWInterface.scanForNetworks`
+having an internal, undocumented rate limit that a request arriving too soon
+after recent scans blocks against (rather than erroring) until the window
+clears — not something raising the adapter's own timeout can fix, since a
+longer deadline just waits out one blocked call while the next one arrives
+before the window clears again.
+
+**Fix**: poll much less often. `--tick-ms 20000` MEASURED zero timeouts
+across 90s+ of sustained polling (vs. one warning roughly every 15s at
+`--tick-ms 3000`), with fresh real BSSIDs, `verdict=Permit`, and
+`signal_quality_score` 0.93-0.97 each tick. The 20s subprocess deadline
+(§9.3) gives headroom for an occasional slow scan at this cadence without
+masking a real hang. This is far more conservative than §1.2/§6's original
+"~0.3-0.5 Hz effective rate" estimate (2-3.3s period) — that estimate
+predates this measurement and undersold how aggressively this specific
+macOS version throttles repeated active scans.
 
 **Reproducer:** `v2/tools/macos-wifi-scan/main.swift` (`NSApplication.shared.setActivationPolicy(.accessory)`
 near the top of the file, plus the `scanForNetworks` call in `emitScanOnce` —

@@ -23,9 +23,9 @@
 //! `swiftc`-compiled script — a script has no bundle identity and can never
 //! be authorized. The `--scan-once` path this adapter calls never prompts,
 //! but does actively scan and can take several seconds (see `helper_path`/
-//! [`Self::scan_sync`]'s 12s timeout below).
+//! [`Self::scan_sync`]'s 20s timeout below).
 //!
-//! **Three things beyond a Location grant turned out to be required in
+//! **Four things beyond a Location grant turned out to be required in
 //! practice** (MEASURED on macOS 26.6.2; full investigation, reproducers,
 //! and exact commands in ADR-025 §9):
 //!
@@ -39,6 +39,11 @@
 //!    `RUVIEW_MACOS_WIFI_HELPER` — a `$PATH` symlink to the identical file
 //!    MEASURED as still-redacted, because macOS's CFBundle/TCC resolution
 //!    keys off the literal invoked path, not the symlink target (§9.3).
+//! 4. The caller must poll slowly (>=20s between calls) — sustained faster
+//!    polling MEASURED tripping an apparent macOS-level active-scan rate
+//!    limit after the first 1-2 calls, after which every scan blocks far
+//!    longer than any reasonable per-call timeout until polling backs off
+//!    (§9.4). A longer `scan_sync` deadline alone cannot fix this.
 //!
 //! An out-of-date `mac_wifi` build predating these fixes, or an unauthorized
 //! one, still reports the redacted sentinel, which this adapter continues to
@@ -136,10 +141,14 @@ impl MacosCoreWlanScanner {
         // Older helpers ignore --scan-once and stream forever, so this must
         // stay bounded -- but Apple's own CWInterface docs say a scan "will
         // block for the duration of the scan", and MEASURED durations here
-        // ranged from ~0.4s (cached) to over 5s (cold). 12s gives headroom
-        // above that observed range while still bounding a truly hung/legacy
-        // helper.
-        let deadline = Instant::now() + Duration::from_secs(12);
+        // ranged from ~0.4s (isolated call) to indefinitely blocked (MEASURED:
+        // sustained polling every few seconds trips an apparent macOS-level
+        // active-scan rate limit; calls then block past any reasonable
+        // adapter-side deadline until polling backs off -- see ADR-025 §9.4).
+        // 20s gives headroom for a cold/contended scan without masking that
+        // rate limit; the real fix is polling less often (§9.4), not a
+        // longer deadline.
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
@@ -390,7 +399,7 @@ mod tests {
         let result = MacosCoreWlanScanner::with_path(path.to_string_lossy()).scan_sync();
         std::fs::remove_file(path).unwrap();
         assert!(matches!(result, Err(WifiScanError::ProcessError(ref e)) if e.contains("timed out")));
-        assert!(start.elapsed() < Duration::from_secs(15));
+        assert!(start.elapsed() < Duration::from_secs(25));
     }
 
     #[test]
