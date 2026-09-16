@@ -125,18 +125,40 @@ func bandLabel(forChannel channel: Int) -> String {
     }
 }
 
-/// Read the connected interface once and print one JSON line to stdout.
+func emitLine(ssid: String, bssid: String, channel: Int, rssi: Int, noise: Int) {
+    let sample: [String: Any] = [
+        "ssid": ssid,
+        "bssid": bssid,
+        "channel": channel,
+        "rssi": rssi,
+        "noise": noise,
+        "band": bandLabel(forChannel: channel),
+        "timestamp": Date().timeIntervalSince1970,
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: sample, options: [.sortedKeys]) else {
+        return
+    }
+    let stdout = FileHandle.standardOutput
+    stdout.write(data)
+    stdout.write(Data([0x0A]))
+}
+
+/// Scan for nearby networks and print one JSON line per network to stdout,
+/// including the connected one. The Rust-side `BssidRegistry`/quality gate
+/// (ADR-025 sections 2.1 and 6) needs several distinct BSSIDs for the
+/// multi-AP diversity pipeline -- a single connected-interface reading is not enough
+/// (`min_bssids: 3` by default), which is why this scans rather than only
+/// reading `CWWiFiClient.shared().interface()`.
 ///
-/// Never requests authorization, never blocks on user input — safe to call
-/// on every tick of the Rust adapter's polling loop.
+/// Never requests authorization, never blocks on user input beyond the scan
+/// itself — safe to call on every tick of the Rust adapter's polling loop,
+/// which allows 5s. Apple's own docs say a scan "will block for the
+/// duration of the scan" (observed here: comfortably under 5s including
+/// this scan), which is also enough time for the CoreWLAN/locationd startup
+/// races described below to settle without a separate artificial delay.
 func emitScanOnce() {
     // A freshly-launched process's location authorization state can still be
-    // mid-sync with `locationd` at this point (see `LocationAuthorizer.status`),
-    // and CoreWLAN's own internal TCC check appears subject to the same
-    // startup race -- `interface.ssid()/.bssid()` were observed redacted
-    // immediately after a confirmed `authorizedAlways` grant, in a brand new
-    // process. Settling here, before touching CoreWLAN, costs ~0.3s of the
-    // adapter's 5s subprocess timeout but gives that sync a chance to land.
+    // mid-sync with `locationd` at this point (see `LocationAuthorizer.status`).
     // Reading `.authorizationStatus` never prompts and never touches actual
     // coordinates.
     _ = LocationAuthorizer().status
@@ -146,33 +168,38 @@ func emitScanOnce() {
         exit(1)
     }
 
-    // Give CoreWLAN's own connection to its backing daemon a moment to
-    // settle too, independent of the CLLocationManager settle above -- same
-    // rationale, different subsystem, unverified whether it is needed.
-    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-
-    let channel = interface.wlanChannel()?.channelNumber ?? 0
-
     // Reported exactly as CoreWLAN returns it, including the
-    // `00:00:00:00:00:00` redaction sentinel when Location authorization is
-    // absent. The Rust adapter — not this helper — decides how to handle a
+    // `00:00:00:00:00:00`/`""` redaction sentinel when Location authorization
+    // is absent. The Rust adapter — not this helper — decides how to handle a
     // redacted identifier.
-    let sample: [String: Any] = [
-        "ssid": interface.ssid() ?? "",
-        "bssid": interface.bssid() ?? "00:00:00:00:00:00",
-        "channel": channel,
-        "rssi": interface.rssiValue(),
-        "noise": interface.noiseMeasurement(),
-        "band": bandLabel(forChannel: channel),
-        "timestamp": Date().timeIntervalSince1970,
-    ]
+    emitLine(
+        ssid: interface.ssid() ?? "",
+        bssid: interface.bssid() ?? "00:00:00:00:00:00",
+        channel: interface.wlanChannel()?.channelNumber ?? 0,
+        rssi: interface.rssiValue(),
+        noise: interface.noiseMeasurement()
+    )
 
-    guard let data = try? JSONSerialization.data(withJSONObject: sample, options: [.sortedKeys]) else {
-        fputs("mac_wifi: failed to encode WiFi sample\n", stderr)
-        exit(1)
+    let networks: Set<CWNetwork>
+    do {
+        networks = try interface.scanForNetworks(withSSID: nil)
+    } catch {
+        // The connected-interface line above was already emitted; a scan
+        // failure (e.g. transient driver busy) just means fewer BSSIDs this
+        // tick, not a hard failure -- exit 0 either way.
+        fputs("mac_wifi: scan failed: \(error.localizedDescription)\n", stderr)
+        exit(0)
     }
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(Data([0x0A]))
+
+    for network in networks {
+        emitLine(
+            ssid: network.ssid ?? "",
+            bssid: network.bssid ?? "00:00:00:00:00:00",
+            channel: network.wlanChannel?.channelNumber ?? 0,
+            rssi: network.rssiValue,
+            noise: network.noiseMeasurement
+        )
+    }
     exit(0)
 }
 
