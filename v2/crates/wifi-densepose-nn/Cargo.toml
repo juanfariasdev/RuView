@@ -29,7 +29,8 @@ serde_json.workspace = true
 tracing.workspace = true
 
 # Tensor operations
-ndarray.workspace = true
+ndarray = { workspace = true, features = ["blas"] }
+ndarray-linalg = { version = "0.18", features = ["openblas-system"] }
 num-traits.workspace = true
 
 # ONNX Runtime (default)

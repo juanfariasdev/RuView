@@ -624,6 +624,9 @@ install_python_deps() {
 install_rust_deps() {
     echo -e "  ${CYAN}Rust dependencies:${RESET}"
 
+    ensure_workspace_submodules
+    configure_openblas_pkg_config
+
     if ! $HAS_RUST; then
         echo "  Rust not found. Installing via rustup..."
         if ! $SKIP_CONFIRM; then
@@ -671,12 +674,47 @@ install_rust_deps() {
             if command -v brew &>/dev/null; then
                 echo "  Installing openblas via Homebrew..."
                 brew install openblas
+                configure_openblas_pkg_config
                 ok "OpenBLAS installed"
             else
                 warn "Install Homebrew and then: brew install openblas"
             fi
         fi
     fi
+}
+
+configure_openblas_pkg_config() {
+    if [[ "$OS_TYPE" == "macos" ]] && command -v brew &>/dev/null; then
+        local openblas_prefix
+        openblas_prefix="$(brew --prefix openblas 2>/dev/null || true)"
+        if [ -n "${openblas_prefix}" ] && [ -d "${openblas_prefix}/lib/pkgconfig" ]; then
+            export PKG_CONFIG_PATH="${openblas_prefix}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+            export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-L native=${openblas_prefix}/lib -l dylib=openblas"
+            ok "OpenBLAS pkg-config path configured"
+        fi
+    fi
+}
+
+ensure_workspace_submodules() {
+    local adapter_manifest="${SCRIPT_DIR}/vendor/rufield/crates/rufield-adapters/Cargo.toml"
+
+    if ! command -v git &>/dev/null || [ ! -f "${SCRIPT_DIR}/.gitmodules" ]; then
+        fail "RuField vendor dependency is missing and Git submodule metadata is unavailable"
+        return 1
+    fi
+
+    echo "  Initializing Rust workspace submodules..."
+    if ! (cd "${SCRIPT_DIR}" && git submodule update --init --recursive); then
+        fail "Unable to initialize Rust workspace submodules"
+        return 1
+    fi
+
+    if [ ! -f "${adapter_manifest}" ]; then
+        fail "vendor/rufield is incomplete: rufield-adapters/Cargo.toml not found"
+        return 1
+    fi
+
+    ok "RuField vendor submodule initialized"
 }
 
 install_wasm_deps() {

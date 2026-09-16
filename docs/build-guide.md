@@ -186,6 +186,8 @@ A high-performance Rust port with ~810x speedup over the Python pipeline for the
 
   # macOS
   brew install openblas
+  export PKG_CONFIG_PATH="$(brew --prefix openblas)/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-L native=$(brew --prefix openblas)/lib -l dylib=openblas"
   ```
 
 ### Build

@@ -182,7 +182,9 @@ burn-cuda = { version = "0.21", default-features = false, features = ["std"] }
 
 # Signal processing
 ndarray = { version = "0.17", features = ["serde"] }
-ndarray-linalg = { version = "0.18", features = ["openblas-static"] }
+# Use the host OpenBLAS installation instead of compiling the bundled source.
+# This avoids failures in OpenBLAS's auxiliary test suite on macOS.
+ndarray-linalg = { version = "0.18", features = ["openblas-system"] }
 rustfft = "6.1"
 num-complex = "0.4"
 num-traits = "0.2"
