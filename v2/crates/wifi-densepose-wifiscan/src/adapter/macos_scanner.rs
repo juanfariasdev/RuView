@@ -1,5 +1,5 @@
 //! Adapter that scans WiFi BSSIDs on macOS by invoking a compiled Swift
-//! helper binary that uses Apple's CoreWLAN framework.
+//! helper app bundle that uses Apple's CoreWLAN framework.
 //!
 //! This is the macOS counterpart to [`NetshBssidScanner`](super::NetshBssidScanner)
 //! on Windows. It follows ADR-025 (ORCA — macOS CoreWLAN WiFi Sensing).
@@ -14,11 +14,37 @@
 //! {"ssid":"MyNetwork","bssid":"aa:bb:cc:dd:ee:ff","rssi":-52,"noise":-90,"channel":36,"band":"5GHz"}
 //! ```
 //!
-//! macOS Sonoma+ redacts real BSSID MACs to `00:00:00:00:00:00` unless the app
-//! holds the `com.apple.wifi.scan` entitlement. When we detect a zeroed BSSID
-//! we generate a deterministic synthetic MAC via `SHA-256(ssid:channel)[:6]`,
-//! setting the locally-administered bit so it never collides with real OUI
-//! allocations.
+//! macOS redacts real BSSID MACs to `00:00:00:00:00:00` unless the *calling
+//! process* holds Location Services "when in use" authorization. Because that
+//! authorization is granted per bundle identifier via TCC, the helper ships
+//! as a minimal ad-hoc-signed `.app` bundle
+//! (`v2/tools/macos-wifi-scan/mac_wifi.app`, see that crate's README) with a
+//! one-time interactive `--request-access` step, rather than a bare
+//! `swiftc`-compiled script — a script has no bundle identity and can never
+//! be authorized. The fast `--scan-once` path this adapter calls never
+//! prompts and never blocks on user input.
+//!
+//! **Location authorization alone was not sufficient in practice** (MEASURED
+//! on macOS 26.6.2): a confirmed, correctly-synced `authorizedAlways` grant
+//! still left `--scan-once` reporting a redacted BSSID/SSID until the helper
+//! also registered a real `NSApplication` (`.accessory` activation policy) —
+//! CoreWLAN's redaction check apparently also verifies the calling process is
+//! a real, WindowServer-registered application, not just a process holding a
+//! valid TCC grant. See `v2/tools/macos-wifi-scan/README.md` and ADR-025
+//! §9.1 for the full investigation and reproducer. Real observations are
+//! MEASURED once the helper is authorized and up to date; an out-of-date
+//! `mac_wifi` build predating this fix, or an unauthorized one, still
+//! reports the redacted sentinel, which this adapter continues to handle via
+//! [`resolve_bssid`] below.
+//!
+//! When we detect a zeroed/redacted BSSID from the helper, *this adapter* —
+//! not the helper — generates a deterministic synthetic MAC via
+//! `SHA-256(ssid:channel)[:6]` (see [`resolve_bssid`]), setting the
+//! locally-administered bit so it never collides with real OUI allocations,
+//! or abstains entirely when there is no SSID either. Keeping that policy
+//! here (and not in the Swift helper) is what preserves the guard against
+//! two distinct redacted networks silently collapsing into one fake
+//! identity.
 //!
 //! # Platform
 //!
@@ -36,9 +62,13 @@ use crate::error::WifiScanError;
 
 /// Synchronous WiFi scanner that shells out to the `mac_wifi` Swift helper.
 ///
-/// The helper binary must be compiled from `archive/v1/src/sensing/mac_wifi.swift` and
-/// placed on `$PATH` or at a known location. The scanner invokes it with a
-/// `--scan-once` flag (single-shot mode) and parses the JSON output.
+/// The helper is built from `v2/tools/macos-wifi-scan/` (see that crate's
+/// README) as an ad-hoc-signed `mac_wifi.app` bundle, then placed on `$PATH`
+/// or at a known location. It requires a one-time interactive
+/// `--request-access` run to grant Location Services authorization before
+/// real (non-redacted) BSSIDs are available. The scanner invokes it with a
+/// `--scan-once` flag (single-shot mode, never blocks on user input) and
+/// parses the JSON output.
 ///
 /// If the helper is not found, [`scan_sync`](Self::scan_sync) returns a
 /// [`WifiScanError::ProcessError`].

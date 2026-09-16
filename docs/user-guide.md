@@ -330,17 +330,23 @@ docker run --network host ruvnet/wifi-densepose:latest --source wifi --tick-ms 5
 
 ### macOS WiFi (RSSI Only)
 
-Uses CoreWLAN via a Swift helper binary. macOS Sonoma 14.4+ redacts real BSSIDs; the adapter generates deterministic synthetic MACs so the multi-BSSID pipeline still works.
+Uses CoreWLAN via a Swift helper app bundle. macOS redacts real BSSIDs unless the helper is authorized; the adapter generates deterministic synthetic MACs (or abstains) so the multi-BSSID pipeline still works either way. Real (non-redacted) BSSIDs are MEASURED working end-to-end on macOS 26.6.2 after `--request-access` — see [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) for the one-time setup and why a plain Location grant alone wasn't enough (needs a real `NSApplication` too, per [ADR-025 §9.1](adr/ADR-025-macos-corewlan-wifi-sensing.md#91-empirical-result-location-authorization-was-necessary-but-not-sufficient--a-real-nsapplication-is-also-required)).
 
 ```bash
-# Compile the Swift helper (once)
-swiftc -O archive/v1/src/sensing/mac_wifi.swift -o mac_wifi
+# Build the mac_wifi.app helper (once)
+cd v2/tools/macos-wifi-scan && ./build.sh
+
+# Grant Location access, interactively, once per machine
+./mac_wifi.app/Contents/MacOS/mac_wifi --request-access
+
+# Put it on $PATH (MacosCoreWlanScanner looks for "mac_wifi" on $PATH)
+ln -sf "$(pwd)/mac_wifi.app/Contents/MacOS/mac_wifi" ~/.local/bin/mac_wifi
 
 # Run natively
 ./target/release/sensing-server --source macos --http-port 3000 --ws-port 3001 --tick-ms 500
 ```
 
-See [ADR-025](adr/ADR-025-macos-corewlan-wifi-sensing.md) for details.
+See [v2/tools/macos-wifi-scan/README.md](../v2/tools/macos-wifi-scan/README.md) and [ADR-025](adr/ADR-025-macos-corewlan-wifi-sensing.md) for details.
 
 ### Linux WiFi (RSSI Only)
 

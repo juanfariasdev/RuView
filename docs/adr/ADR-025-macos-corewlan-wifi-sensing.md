@@ -313,3 +313,90 @@ All verification on Mac Mini (M2 Pro, macOS 26.3).
 - ADR-022: Windows WiFi Enhanced Fidelity (analogous platform adapter)
 - ADR-013: Feature-Level Sensing from Commodity Gear
 - Issue [#56](https://github.com/ruvnet/wifi-densepose/issues/56): macOS support request
+
+---
+
+## 9. Addendum: Location Authorization Requires an App-Bundle Identity
+
+The original sketch in §3.2 implied a bare `swiftc`-compiled CLI binary. Building
+that against current [Core Location](https://developer.apple.com/documentation/corelocation)
+and [CoreWLAN](https://developer.apple.com/documentation/corewlan) documentation
+surfaced a hard constraint this ADR under-specified: macOS's TCC subsystem
+grants Location Services authorization per *bundle identifier*, and only a
+process with a real `.app` bundle (`Info.plist` with
+`NSLocationWhenInUseUsageDescription`, a stable `CFBundleIdentifier`) can hold
+that grant. A bare script has no such identity and can never be authorized —
+it is permanently stuck on the redacted/synthetic-BSSID fallback described in
+§1.2 and §6.
+
+The implemented helper (`v2/tools/macos-wifi-scan/`) is therefore a minimal,
+ad-hoc-signed `mac_wifi.app` with two CLI modes on the same binary:
+
+- `--request-access` — foreground, interactive, run once per machine. Calls
+  `CLLocationManager.requestWhenInUseAuthorization()` (the least-privilege
+  option; this tool has no background-location use case that would justify
+  "always" authorization) and waits, bounded, for the user's decision via the
+  modern `locationManagerDidChangeAuthorization(_:)` delegate callback.
+- `--scan-once` — the only mode the Rust adapter calls. Never requests
+  authorization and never blocks on user input; it reads
+  `CWWiFiClient.shared().interface()` and reports whatever CoreWLAN currently
+  allows, redacted or not, within the existing 5s subprocess timeout.
+
+The Rust-side synthetic-BSSID / abstain policy (§2.1.3, `resolve_bssid` in
+`macos_scanner.rs`) is unchanged and deliberately not duplicated in the Swift
+helper: `--scan-once` always reports the raw CoreWLAN value, so the Rust
+adapter remains the single place deciding whether to synthesize a pseudo-BSSID
+or abstain when an identifier is redacted.
+
+### 9.1 Empirical Result: Location Authorization Was Necessary But Not Sufficient — a Real NSApplication Is Also Required
+
+Tested live on macOS 26.6.2 (build 25G83), MEASURED (reproducer below).
+`CWInterface.h`'s current on-disk doc comment states redaction lifts once
+"Location Services is enabled and the user has authorized the calling app" —
+that undersells the actual requirement.
+
+Diagnostic path (each numbered step confirmed before moving to the next):
+
+1. `mac_wifi --request-access` → user grants access → in-process read reports
+   `authorizedAlways`.
+2. A **separate, freshly-launched process** immediately reading
+   `CLLocationManager().authorizationStatus` incorrectly reported
+   `.notDetermined` — traced to an XPC sync race with `locationd`: the very
+   first read in a new process can return a stale default before the real,
+   persisted decision lands. Fixed by giving the run loop one short tick
+   (`RunLoop.main.run(until:)`, ~0.3s) before trusting the value; `lsregister
+   -f` (Launch Services re-registration) made no difference, ruling that out
+   as the cause of the stale read.
+3. With that race fixed and `--status` now *correctly and repeatably*
+   reporting `authorizedAlways` in a brand new process, `--scan-once`
+   (invoked immediately after, same authorized binary, no rebuild) **still
+   returned `ssid:""` and `bssid:"00:00:00:00:00:00"`**. Ruled out along the
+   way: a restricted Apple entitlement (a real-world counter-example —
+   `/Applications/Fing.app`, an ad-hoc-signed third-party app with *zero*
+   entitlements and *no* `NSLocation*UsageDescription` key at all — turned
+   out to identify LAN devices via ARP, not CoreWLAN, so it was never a valid
+   counter-example for CoreWLAN specifically, but it prompted re-checking the
+   entitlement theory rather than accepting it); a separate macOS-wide
+   Location Services "System Services" toggle (no such toggle exists for
+   Wi-Fi in this System Settings build); launching via `open`/LaunchServices
+   instead of a raw subprocess exec (no difference).
+4. **Fix**: `main.swift` never engaged AppKit's application lifecycle — it
+   was a bare `Foundation`-linked executable that happened to sit inside an
+   `.app` bundle. Calling `NSApplication.shared.setActivationPolicy(.accessory)`
+   once at process start (keeping it Dock-less, matching `LSUIElement`),
+   combined with a second, CoreWLAN-specific settle delay
+   (`RunLoop.main.run(until:)`, ~0.5s, after acquiring the interface and
+   before reading `ssid()`/`bssid()`), made `--scan-once` return real values
+   (`bssid:"90:76:9f:73:e0:a5"`, `ssid:"Juan Farias"`), reproducibly across
+   repeated calls. CoreWLAN's redaction check apparently verifies the calling
+   process is a real, WindowServer-registered application, not merely a
+   process holding a valid TCC grant.
+
+**Reproducer:** `v2/tools/macos-wifi-scan/main.swift` (`NSApplication.shared.setActivationPolicy(.accessory)`
+near the top of the file, plus the settle delay in `emitScanOnce`). Build via
+`./build.sh`, run `mac_wifi --request-access` once, then `mac_wifi --scan-once`.
+
+**Status of the mitigation in §2.1.3 / §6:** unchanged and still correct as a
+safety net for whatever CoreWLAN returns (redacted or not) — this finding
+does not remove the need for it, since redaction still applies before
+authorization, on other machines, or if a future macOS tightens this further.

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>net.ruv.ruview.macos-wifi-scan</string>
+    <key>CFBundleName</key>
+    <string>RuView Wi-Fi Sensor</string>
+    <key>CFBundleDisplayName</key>
+    <string>RuView Wi-Fi Sensor</string>
+    <key>CFBundleExecutable</key>
+    <string>mac_wifi</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <!-- LSUIElement: this is a headless helper invoked repeatedly as a
+         subprocess by the Rust sensing server; it must never claim a Dock
+         icon or menu bar item. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Required for CLLocationManager.requestWhenInUseAuthorization() to
+         unlock non-redacted CWInterface.bssid()/ssid() reads (ADR-025). Kept
+         accurate to what this tool actually does: it never reads GPS
+         coordinates, only unlocks Wi-Fi access-point metadata via CoreWLAN. -->
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>RuView uses Location Services only to unlock precise Wi-Fi access-point identifiers (BSSIDs) from CoreWLAN for on-device RF sensing. Your location coordinates are never read, stored, or transmitted — only nearby Wi-Fi signal metadata is used.</string>
+</dict>
+</plist>
